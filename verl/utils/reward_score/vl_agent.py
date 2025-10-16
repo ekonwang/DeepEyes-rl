@@ -7,26 +7,74 @@ import os
 from math_verify import parse, verify
 
 openai_api_key = "EMPTY"
-openai_api_base_list = [
-    # "http://172.30.52.123:8000/v1",
-    # "http://10.39.3.123:18901/v1",
-    os.environ.get("LLM_AS_A_JUDGE_BASE", "http://10.39.3.123:18901/v1"),
-]
+# openai_api_base_list = [
+#     os.environ.get("LLM_AS_A_JUDGE_BASE", "http://29.225.242.90:18901/v1"),
+# ]
+# openai_api_base_list = ["http://29.225.242.25:18901/v1", "http://29.226.3.167:18901/v1"]
+# openai_api_base_list = ["http://29.177.193.220:18901/v1", "http://29.177.112.27:18901/v1"]
+openai_api_base_list = ["http://29.225.240.118:18901/v1"]
+try:
+    client_list = []
+    for api_base in openai_api_base_list:
+        client = OpenAI(
+            api_key=openai_api_key,
+            base_url=api_base,
+        )
+        client_list.append(client)
+    model_name_list = []
+    for client in client_list:
+        response = requests.get(f"{api_base}/models")
+        models = response.json()
+        model_name_list.append(models['data'][0]['id'])
+except:
+    print(" [ERROR] Failed to initialize OpenAI client. Please check your API key and base URL.")
+    client_list = []
+    model_name_list = []
 
-client_list = []
-for api_base in openai_api_base_list:
-    client = OpenAI(
-        api_key=openai_api_key,
-        base_url=api_base,
-    )
-    client_list.append(client)
-model_name_list = []
-for client in client_list:
-    response = requests.get(f"{api_base}/models")
-    models = response.json()
-    model_name_list.append(models['data'][0]['id'])
 
+API_KEY = "e78f0919-4770-4dea-b0a5-c0e6b56866fb"
+MODEL_NAME = "api_azure_openai_gpt-4o-mini"
+MODEL_MARKER = "api_azure_openai_gpt-4o-mini"
 
+# API_KEY = "aa57e5e3-92de-4d6c-8e60-8f57c6d4ec4a"
+# MODEL_NAME = "api_openai_chatgpt-4o-latest"
+# MODEL_MARKER = "api_openai_chatgpt-4o-latest"
+
+import glob
+import pandas as pd
+
+import json
+
+def send_request(messages):
+    json_data = {
+        "bid": "open_api_test",
+        "server": "open_api",
+        "services": [],
+        "request_id": "1234",
+        "session_id": "12345",  
+        # "api_key": "90237a2c-0b99-4d4e-8e78-b3473ad3e13c",
+        "api_key": API_KEY,
+        "model_marker": MODEL_MARKER,
+        "system": "", # 模型人设
+        "timeout": 300, # 超时时间,单位秒
+        "model_name": MODEL_NAME,
+        "messages": messages,
+        "params":{}
+    }
+
+    url= "http://trpc-utools-prod.turbotke.production.polaris:8009/"
+    
+    res = requests.post(url=url, json=json_data, proxies={"http": None, "https": None})
+    # print(res)
+    # print(res.json()['answer'][0]['value'])
+    if res.status_code == 200 and res is not None:
+        # print('input', json_data)
+        if random.random() < 0.01:
+            print("res.json()",res.json())
+        print(res.json())
+        return(res.json()['answer'][0]['value'])
+    else:
+        return ""
 
 def get_chat_template():
     chat_template = """
@@ -188,82 +236,135 @@ def extract_answer(text):
 
 
 def compute_score(predict_str: str, ground_truth: str, extra_info=None) -> float:
+    
     is_format_error = False
     # predict_str = "<think>" + predict_str
     count_think_1 = predict_str.count("<think>")
     count_think_2 = predict_str.count("</think>")
     if count_think_1 != count_think_2:
+        print(f"count_think_1 {count_think_1} != count_think_2 {count_think_2}")
         is_format_error = True
 
     count_vision_1 = predict_str.count("<|vision_start|><|image_pad|>")
     count_vision_2 = predict_str.count("<|image_pad|><|vision_end|>")
     if count_vision_1 != count_vision_2:
+        print(f"count_vision_1 {count_vision_1} != count_vision_2 {count_vision_2}")
         is_format_error = True
 
     predict_no_think = predict_str.split('</think>')[-1].strip()
     count_answer_1 = predict_no_think.count("<answer>")
     count_answer_2 = predict_no_think.count("</answer>")
     if count_answer_1 != count_answer_2:
+        print(f"count_answer_1 {count_answer_1} != count_answer_2 {count_answer_2}")
         is_format_error = True
+    
+    if is_format_error:
+        with open("/mnt/lzy/DeepEyes/logs/debug_crop_reflection_predstr.txt", "a") as f:
+            f.write(f"{predict_str}\n\n\n\n")
 
-    answer_text = predict_str.split("<answer>")[-1].split("</answer>")[0].strip()
+    model_answer = extract_answer(predict_no_think)
 
-    # pattern = re.compile(r'<\|im_start\|>assistant(.*?)$', re.DOTALL)  # 匹配最后一个 target 后的所有内容
-    # match = pattern.search(predict_str)
-    # if match:
-    #     answer_text = match.group(1).strip()
-    #     print(f'DEBUG{answer_text=}')
-    # else:
-    #     answer_text = ""
-
-    question_text = extra_info['question']
-    full_prompt = get_prompt(answer_text, ground_truth, question_text)
-
-    client_idx = random.randint(0, len(client_list) - 1)
-    client = client_list[client_idx]
-    model_name = model_name_list[client_idx]
-
-    chat_response = client.chat.completions.create(
-        model=model_name,
-        messages=[
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": full_prompt},
-        ],
-        seed = random.randint(0, 1000000),
-        temperature=0.3,
-    )
-    response = chat_response.choices[0].message.content.strip()
-    # print(response)
-    if 'Judgement:' in response:
-        response = response.split('Judgement:')[-1].strip()
-        if '1' in response:
-            acc_reward = 1.0
-        elif '0' in response:
-            acc_reward = 0.0
-        else:
-            print(f' [WARNING] resp format error {response=}')
-            acc_reward = 0.0
-    else:
-        if response == '1':
-            acc_reward = 1.0
-        elif response == '0':
-            acc_reward = 0.0
-        else:
-            print(f' [WARNING] resp format error {response=}')
-            acc_reward = 0.0
-
-    # Penalize for model trying to predict longer answer to hack llm-as-judge
-    if len(answer_text) >= 1000:
+    if model_answer is None:
+        print(f"cannot extract <answer> from predict_no_think {predict_no_think}")
         acc_reward = 0.0
         is_format_error = True
+    else:
+        # if rule_math_verify(ground_truth, model_answer):
+        #     acc_reward = 1.0
+        try:
+            if str(model_answer) == str(ground_truth):
+                acc_reward = 1.0
+            else:
+                verify_content = generative_verify(extra_info['question'], ground_truth, model_answer)
+                acc_reward = 1.0 if verify_content else 0.0
+                if acc_reward == 0:
+                    print(f"verify_content: {verify_content}")
+                    print(f"ground_truth: {ground_truth}")
+                    print(f"model_answer: {model_answer}")
+                    print(f"pred_no_think: {predict_no_think}")
+                # acc_reward = 0.0
+        except Exception as e:
+            acc_reward = 0.0
+            print(f"Evaluation failed with {e}")
+    # question_text = extra_info['question']
+    # full_prompt = get_prompt(answer_text, ground_truth, question_text)
+
+    # client_idx = random.randint(0, len(client_list) - 1)
+    # client = client_list[client_idx]
+    # model_name = model_name_list[client_idx]
+
+    # response = ""
+    # for it in range(3):
+    #     try:
+    #         chat_response = client.chat.completions.create(
+    #             model=model_name,
+    #             messages=[
+    #                 {"role": "system", "content": "You are a helpful assistant."},
+    #                 {"role": "user", "content": full_prompt},
+    #             ],
+    #             seed = random.randint(0, 1000000),
+    #             temperature=0.3,
+    #         )
+    #         response = chat_response.choices[0].message.content.strip()
+    #         break
+    #     except Exception as e:
+    #         print(f' [ERROR math] generative_verify error: {e}')
+    #         continue
+    
+    # # ###: TEMPORARY DEBUG
+    # # response = random.choice(['1', '0', 'Judgement: 1', 'Judgement: 0'])
+
+    # # print(response)
+    # if 'Judgement:' in response:
+    #     response = response.split('Judgement:')[-1].strip()
+    #     if '1' in response:
+    #         acc_reward = 1.0
+    #     elif '0' in response:
+    #         acc_reward = 0.0
+    #     else:
+    #         print(f' [WARNING] resp format error {response=}')
+    #         acc_reward = 0.0
+    # else:
+    #     if response == '1':
+    #         acc_reward = 1.0
+    #     elif response == '0':
+    #         acc_reward = 0.0
+    #     else:
+    #         print(f' [WARNING] resp format error {response=}')
+    #         acc_reward = 0.0
+
+        # Penalize for model trying to predict longer answer to hack llm-as-judge
+        if len(model_answer) >= 1000:
+            acc_reward = 0.0
+            is_format_error = True
 
     tool_reward_base = 1.0 if count_vision_1 > 0 else 0.0
     tool_reward = 1.0 if count_vision_1 > 0 and acc_reward > 0.5 else 0.0
+    no_tool_reward = -1.0 if count_vision_1 == 0 and acc_reward < 0.5 else 0.0
     format_reward = -1.0 if is_format_error else 0.0
     # reward 1
     # return 0.8 * acc_reward + 0.2 * format_reward + 0.4 * tool_reward_base
     # reward 2
-    return 0.8 * acc_reward + 0.2 * format_reward + 1.2 * tool_reward
+    # with open("/mnt/lzy/DeepEyes/logs/debug_crop_reward.txt", "a") as f:
+    #     f.write(f"acc_reward: {acc_reward}, tool_reward: {tool_reward}, format_reward: {format_reward}\n")
+    # return 1.2 * acc_reward + 0.4 * format_reward + 0.4 * tool_reward
+    # reward 3
+    # return 1.2 * acc_reward + 0.4 * format_reward
+    # reward 4
+    # from ray.util import pdb; pdb.set_trace()
+    # with open("/mnt/lzy/DeepEyes/logs/debug_crop_reward3.txt", "a") as f:
+    #     f.write(f"acc_reward: {acc_reward}, tool_reward: {tool_reward}, no_tool_reward: {no_tool_reward}, format_reward: {format_reward}\n")
+    # score = 1.2 * acc_reward + 0.4 * format_reward + 0.8 * tool_reward + 0.4 * no_tool_reward
+    # score = 1.2 * acc_reward + 0.4 * format_reward + 0.4 * tool_reward + 0.4 * no_tool_reward
+    score = 1.2 * acc_reward + 0.4 * format_reward
+    return_dict = {
+        "score": score,
+        "acc_reward": acc_reward,
+        "format_reward": format_reward,
+        "tool_reward": tool_reward,
+        "no_tool_reward": no_tool_reward
+    }
+    return return_dict
 
     # reward 2 
     # return 1.0 * acc_reward + 0.2 * format_reward + 1.0 * tool_reward + 0.2 * tool_reward_base
@@ -274,6 +375,74 @@ def compute_score(predict_str: str, ground_truth: str, extra_info=None) -> float
     # extra_reward = tool_reward_base * (count_vision_1 - 1) * (1 - acc_reward)
     # return  0.8 * acc_reward + 0.2 * format_reward + 0.4 * tool_reward_base  + 0.2 * extra_reward
 
+
+def compute_score_crop(predict_str: str, ground_truth: str, extra_info=None) -> float:
+    is_format_error = False
+    # predict_str = "<think>" + predict_str
+    count_think_1 = predict_str.count("<think>")
+    count_think_2 = predict_str.count("</think>")
+    if count_think_1 != count_think_2:
+        is_format_error = True
+
+    count_vision_1 = predict_str.count("<|vision_start|><|image_pad|>")
+    count_vision_2 = predict_str.count("<|image_pad|><|vision_end|>")
+    print("count_vision: ", count_vision_1, count_vision_2)
+    if count_vision_1 != count_vision_2:
+        is_format_error = True
+
+    crop_tool_call_format_error = False
+    count_crop = predict_str.count("Therefore, I decide to crop the image with tool_call.")
+    count_nocrop = predict_str.count("Therefore, I decide not to crop the image.")
+    count_tool_call = predict_str.count("<tool_call>")
+    print("count_tool_call: ", count_crop, count_nocrop, count_tool_call)
+    if count_crop == 0 and count_nocrop == 0:       # 都没出现
+        crop_tool_call_format_error = True
+    if count_crop > 0 and count_nocrop > 0:         # 都出现
+        crop_tool_call_format_error = True
+    if count_nocrop > 0 and count_tool_call > 0:    # 不crop
+        crop_tool_call_format_error = True
+    if count_crop > 0 and count_tool_call == 0:     # 要crop
+        crop_tool_call_format_error = True
+
+    predict_no_think = predict_str.split('</think>')[-1].strip()
+    count_answer_1 = predict_no_think.count("<answer>")
+    count_answer_2 = predict_no_think.count("</answer>")
+    if count_answer_1 != count_answer_2:
+        is_format_error = True
+
+    model_answer = extract_answer(predict_no_think)
+
+    if model_answer is None:
+        acc_reward = 0.0
+        is_format_error = True
+        crop_tool_call_format_error = True
+    else:
+        # if rule_math_verify(ground_truth, model_answer):
+        #     acc_reward = 1.0
+        try:
+            if str(model_answer) == str(ground_truth):
+                acc_reward = 1.0
+            else:
+                acc_reward = 1.0 if generative_verify(extra_info['question'], ground_truth, model_answer) else 0.0
+                # acc_reward = 0.0
+        except:
+            acc_reward = 0.0
+
+        # Penalize for model trying to predict longer answer to hack llm-as-judge
+        if len(model_answer) >= 1000:
+            acc_reward = 0.0
+            is_format_error = True
+
+    tool_reward_base = 1.0 if count_vision_1 > 0 else 0.0
+    tool_reward = 1.0 if count_vision_1 > 0 and acc_reward > 0.5 else 0.0
+    format_reward = -1.0 if is_format_error else 0.0
+    crop_tool_call_reward = -1.0 if crop_tool_call_format_error else 0.0
+    # reward 1
+    # return 0.8 * acc_reward + 0.2 * format_reward + 0.4 * tool_reward_base
+    # reward 2
+    # return 0.8 * acc_reward + 0.2 * format_reward + 1.2 * tool_reward
+    # reward 3
+    return 1.6 * acc_reward + 0.4 * format_reward + 0.4 * crop_tool_call_reward
 
 
 def compute_common_reasoning(predict_str: str, ground_truth: str, extra_info=None) -> float:
@@ -314,7 +483,12 @@ def compute_common_reasoning(predict_str: str, ground_truth: str, extra_info=Non
         )
 
         acc_reward = 0.0
-        for ix in range(8):
+        for ix in range(5):
+            # messages = [
+            #         {"role": "user", "content": full_prompt},
+            # ]
+            # response = send_request(messages)
+
             chat_response = client.chat.completions.create(
                 model=model_name,
                 messages=[
@@ -325,6 +499,10 @@ def compute_common_reasoning(predict_str: str, ground_truth: str, extra_info=Non
             )
             response = chat_response.choices[0].message.content.strip()
             judgement = response.split('## Equivalence Judgement')[-1].lower()
+
+            # # TEMP DEBUG
+            # judgement = random.choice(['true', 'false'])
+
             if 'true' in judgement and 'false' not in judgement:
                 acc_reward = 1.0
                 break
@@ -338,7 +516,7 @@ def compute_common_reasoning(predict_str: str, ground_truth: str, extra_info=Non
     tool_reward_base = 1.0 if count_vision_1 > 0 else 0.0
     tool_reward = 1.0 if count_vision_1 > 0 and acc_reward > 0.5 else 0.0
     format_reward = -1.0 if is_format_error else 0.0
-    print(f' [DEBUG] query={extra_info["question"]}, {ground_truth=}, {answer_text=}, {acc_reward=}, {format_reward=}')
+    # print(f' [DEBUG] query={extra_info["question"]}, {ground_truth=}, {answer_text=}, {acc_reward=}, {format_reward=}')
     return 0.8 * acc_reward + 0.2 * format_reward + 1.2 * tool_reward
 
 
@@ -353,15 +531,20 @@ def generative_verify(query, ground_truth, model_answer):
     client = client_list[client_idx]
     model_name = model_name_list[client_idx]
 
-    full_prompt = MATH_VERIFY_PROMPT.format(
+    full_prompt = COMMON_VERIFY_PROMPT.format(
         query=query,
         gold_ans=ground_truth,
         pred_ans=model_answer,
     )
 
     response = ""
-    for it in range(8):
+    for it in range(5):
         try:
+            # messages = [
+            #     {"role": "user", "content": full_prompt},
+            # ]
+            # response = send_request(messages)
+
             chat_response = client.chat.completions.create(
                 model=model_name,
                 messages=[
@@ -371,12 +554,16 @@ def generative_verify(query, ground_truth, model_answer):
                 temperature=0.0,
             )
             response = chat_response.choices[0].message.content.strip()
+
+            # response = random.choice(['## Equivalence Judgement: true', '## Equivalence Judgement: false'])
+
             break
         except Exception as e:
             print(f' [ERROR math] generative_verify error: {e}')
             continue
     
     judgement = response.split('## Equivalence Judgement')[-1].lower()
+    # print(f' [DEBUG math] query={query}, {ground_truth=}, {model_answer=}, {judgement=}')
     if 'true' in judgement and 'false' not in judgement:
         return True
     elif 'false' in judgement and 'true' not in judgement:
@@ -415,10 +602,276 @@ def compute_score_math(predict_str: str, ground_truth: str, extra_info=None) -> 
     return 1.2 * acc_reward + 0.4 * format_reward
 
 
+def compute_score_counting(predict_str: str, ground_truth: str, extra_info=None) -> float:
+
+    # # save predict str to txt file
+    # with open('/mnt/lzy/DeepEyes/predict_str.txt', 'w') as f:
+    #     f.write(predict_str + '\n')
+
+    is_format_error = False
+    # predict_str = "<think>" + predict_str
+    count_think_1 = predict_str.count("<think>")
+    count_think_2 = predict_str.count("</think>")
+    if count_think_1 != count_think_2:
+        is_format_error = True
+
+    count_tool_calling_1 = predict_str.count("<tool_call>")
+    count_tool_calling_2 = predict_str.count("</tool_call>")
+    if count_tool_calling_1 != count_tool_calling_2:
+        is_format_error = True
+
+    count_answer_1 = predict_str.count("<answer>")
+    count_answer_2 = predict_str.count("</answer>")
+    if count_answer_1 != count_answer_2:
+        is_format_error = True
+
+    predict_no_think = predict_str.split('</think>')[-1].strip()
+    model_answer = extract_answer(predict_no_think)
+    if model_answer is None:
+        acc_reward = 0.0
+        is_format_error = True
+    else:
+        # if rule_math_verify(ground_truth, model_answer):
+        #     acc_reward = 1.0
+        try:
+            model_answer_int = int(model_answer)
+            if int(model_answer_int) == int(ground_truth):
+                acc_reward = 1.0
+            else:
+                acc_reward = 0.0
+        except:
+            acc_reward = 0.0
+            
+    format_reward = -1.0 if is_format_error else 0.0
+    print(f' [DEBUG] query={extra_info["question"]}, {ground_truth=}, {model_answer=}, {acc_reward=}, {format_reward=}')
+    return 1.2 * acc_reward + 0.4 * format_reward
+
+def compute_score_chart(predict_str: str, ground_truth: str, extra_info=None) -> float:
+
+    is_format_error = False
+    # predict_str = "<think>" + predict_str
+    count_think_1 = predict_str.count("<think>")
+    count_think_2 = predict_str.count("</think>")
+    if count_think_1 != count_think_2:
+        is_format_error = True
+
+    count_tool_calling_1 = predict_str.count("<tool_call>")
+    count_tool_calling_2 = predict_str.count("</tool_call>")
+    if count_tool_calling_1 != count_tool_calling_2:
+        is_format_error = True
+
+    count_answer_1 = predict_str.count("<answer>")
+    count_answer_2 = predict_str.count("</answer>")
+    if count_answer_1 != count_answer_2:
+        is_format_error = True
+
+    predict_no_think = predict_str.split('</think>')[-1].strip()
+    model_answer = extract_answer(predict_no_think)
+    if model_answer is None:
+        acc_reward = 0.0
+        is_format_error = True
+    else:
+        # if rule_math_verify(ground_truth, model_answer):
+        #     acc_reward = 1.0
+        try:
+            if str(model_answer) == str(ground_truth):
+                acc_reward = 1.0
+            else:
+                acc_reward = 1.0 if generative_verify(extra_info['question'], ground_truth, model_answer) else 0.0
+                # acc_reward = 0.0
+        except:
+            acc_reward = 0.0
+            
+    format_reward = -1.0 if is_format_error else 0.0
+    print(f' [DEBUG] query={extra_info["question"]}, {ground_truth=}, {model_answer=}, {acc_reward=}, {format_reward=}')
+    return 1.2 * acc_reward + 0.4 * format_reward
+
+import ast
+
+def evaluate_steps(ground_truth, predicted_steps, road_pixel):
+    # Convert ground_truth if it's a string
+    if isinstance(ground_truth, str):
+        try:
+            ground_truth = ast.literal_eval(ground_truth)
+        except (ValueError, SyntaxError):
+            return 0.0
+    
+    # Convert predicted_steps if it's a string
+    if isinstance(predicted_steps, str):
+        try:
+            predicted_steps = ast.literal_eval(predicted_steps)
+        except (ValueError, SyntaxError):
+            return 0.0
+    
+    # Check if ground_truth is a list of lists with 2 numbers each
+    if not isinstance(ground_truth, list):
+        return 0.0
+    for point in ground_truth:
+        if not isinstance(point, (list, tuple)) or len(point) != 2:
+            return 0.0
+        if not all(isinstance(coord, (int, float)) for coord in point):
+            return 0.0
+    
+    # Check if predicted_steps is a list
+    if not isinstance(predicted_steps, list):
+        return 0.0
+    
+    # Check each step in predicted_steps
+    for step in predicted_steps:
+        # Check if each step is a list or tuple of length 2 with numbers
+        if not isinstance(step, (list, tuple)) or len(step) != 2:
+            return 0.0
+        if not all(isinstance(coord, (int, float)) for coord in step):
+            return 0.0
+    
+    # Check duplicate steps
+    seen = set()
+    for step in predicted_steps:
+        # 将列表转换为元组，因为列表是不可哈希的
+        step_tuple = tuple(step)
+        if step_tuple in seen:
+            return 0.0
+        seen.add(step_tuple)
+
+    n_truth = len(ground_truth)
+    n_pred = len(predicted_steps)
+    correct_count = 0
+    
+    # Compare each step up to the minimum length
+    for i in range(min(n_truth, n_pred)):
+        gt_point = ground_truth[i]
+        pred_point = predicted_steps[i]
+        # Check if the predicted point is within the road_pixel tolerance
+        if (abs(gt_point[0] - pred_point[0]) < road_pixel  and 
+            abs(gt_point[1] - pred_point[1]) < road_pixel):
+            correct_count += 1
+    
+    # Normalize by the total number of ground truth steps
+    score = correct_count / n_truth if n_truth > 0 else 0.0
+    return score
+
+
+def bresenham_line(x0, y0, x1, y1):
+    points = []
+    dx = abs(x1 - x0)
+    dy = abs(y1 - y0)
+    x, y = x0, y0
+    sx = 1 if x0 < x1 else -1
+    sy = 1 if y0 < y1 else -1
+    if dx > dy:
+        err = dx / 2.0
+        while x != x1:
+            points.append((x, y))
+            err -= dy
+            if err < 0:
+                y += sy
+                err += dx
+            x += sx
+    else:
+        err = dy / 2.0
+        while y != y1:
+            points.append((x, y))
+            err -= dx
+            if err < 0:
+                x += sx
+                err += dy
+            y += sy
+    points.append((x, y))
+    return points
+
+def is_route_clear(image, route):
+    # Convert image to RGB if it's not
+    if image.mode != 'RGB':
+        image = image.convert('RGB')
+    
+    width, height = image.size
+    int_route = []
+    for point in route:
+        x, y = point
+        ix = int(round(x))
+        iy = int(round(y))
+        int_route.append((ix, iy))
+    
+    visited_pixels = set()
+    
+    for i in range(len(int_route) - 1):
+        x0, y0 = int_route[i]
+        x1, y1 = int_route[i+1]
+        pixels = bresenham_line(x0, y0, x1, y1)
+        for (px, py) in pixels:
+            if (px, py) in visited_pixels:
+                continue
+            visited_pixels.add((px, py))
+            if px < 0 or px >= width or py < 0 or py >= height:
+                continue
+            pixel_value = image.getpixel((px, py))
+            if pixel_value == (0, 0, 0):
+                return False
+    return True
+
+def compure_score_maze(predict_str: str, ground_truth: str, extra_info=None) -> float:
+
+    is_format_error = False
+    break_wall_reward = 0.0
+    # predict_str = "<think>" + predict_str
+    count_think_1 = predict_str.count("<think>")
+    count_think_2 = predict_str.count("</think>")
+    if count_think_1 != count_think_2:
+        is_format_error = True
+
+    count_tool_calling_1 = predict_str.count("<tool_call>")
+    count_tool_calling_2 = predict_str.count("</tool_call>")
+    if count_tool_calling_1 != count_tool_calling_2:
+        is_format_error = True
+
+    count_answer_1 = predict_str.count("<answer>")
+    count_answer_2 = predict_str.count("</answer>")
+    if count_answer_1 != count_answer_2:
+        is_format_error = True
+
+    predict_no_think = predict_str.split('</think>')[-1].strip()
+    model_answer = extract_answer(predict_no_think)
+
+
+    if model_answer is None:
+        acc_reward = 0.0
+        is_format_error = True
+    else:
+        # if rule_math_verify(ground_truth, model_answer):
+        #     acc_reward = 1.0
+        model_answer = model_answer.replace('The result path is ', '')
+        try:
+            if str(model_answer) == str(ground_truth):
+                acc_reward = 1.0
+            else:
+                if not is_route_clear(extra_info['pil_image'], model_answer):
+                    acc_reward = 0.0
+                    break_wall_reward = -1.0
+                else:
+                    acc_reward  = evaluate_steps(ground_truth, model_answer, extra_info["road_pixel"])
+        except:
+            acc_reward = 0.0
+            
+    format_reward = -1.0 if is_format_error else 0.0
+    print(f' [DEBUG] query={extra_info["question"]}, {ground_truth=}, {model_answer=}, {acc_reward=}, {format_reward=}')
+    score = 1.2 * acc_reward + 0.4 * format_reward + break_wall_reward
+
+    return_dict = {
+        "score": score,
+        "acc_reward": acc_reward,
+        "format_reward": format_reward,
+        "break_wall_reward": break_wall_reward,
+    }
+    return return_dict
+
+
 if __name__ == '__main__':
-    predict_str = "The answer is <think> 2 + 2 = 4 </think> <answer> right </answer> <answer> left </answer>"
+    # predict_str = "The answer is <think> 2 + 2 = 4 </think> <answer> left </answer>"
+    predict_str = "The woman is to the left of the man."
     ground_truth = "left"
     extra_info = {'answer': 'The woman is to the left of the man who is holding the camera.', 'id': 0, 'image': '/cpfs/user/honglingyi/DATA/LLM/Vstar/gqa/images/713270.jpg', 'pred_ans': 'The woman is to the right of the man who is holding the camera.', 'question': 'Is the woman to the left or to the right of the man who is holding the camera?'}
 
     score = compute_score(predict_str, ground_truth, extra_info)
+    score = generative_verify(extra_info['question'], ground_truth, predict_str)
     print(f"Score: {score}")
+    score = compute_common_reasoning(predict_str, ground_truth, extra_info)

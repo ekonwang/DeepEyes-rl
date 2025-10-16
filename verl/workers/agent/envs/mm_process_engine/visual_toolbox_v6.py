@@ -38,8 +38,8 @@ def compute_crop_scaled_size(resize_h, resize_w, crop_h, crop_w, max_len=32768, 
 
     return scaled_h, scaled_w
 
-class VisualToolBoxV2(ToolBase):
-    name = "visual_toolbox_v2"
+class VisualToolBoxV6(ToolBase):
+    name = "visual_toolbox_v6"
     # user_prompt = "Here is the cropped image returned after you calling the function {}.\nIf the images provided above are sufficient to answer the user's question, please put your final answer within <answer></answer>. Otherwise you can continue to call tools within <tool_call></tool_call>."
 
     user_prompt = PROMPT.USER_PROMPT_V2
@@ -107,34 +107,49 @@ class VisualToolBoxV2(ToolBase):
                 # Zoom in by cropping the image
                 # image_path = args["image_path"]
                 bbox = args["bbox_2d"]
-                bbox = self.maybe_resize_bbox(*bbox)
+                if bbox[0] < 0 or bbox[1] < 0 or bbox[2] > 1 or bbox[3] > 1:
+                    raise ValueError(f"ZOOM IN BBOX SHOULD BE IN [0,1] RANGE {bbox=}")
+                if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
+                    raise ValueError(f"ZOOM IN BBOX IS INVALID {bbox=}")
+                image_index = args["index"]
                 if not bbox:
                     raise ValueError(f"ZOOM IN ARGUMENTS ARE INVALID")
                 # img = Image.open(image_path)
-                img = self.multi_modal_data['image'][0]
-                cropped_img = img.crop(bbox)
-                # current_image = cropped_img
-
-                # zoom in
+                img = vllm_input_list['multi_modal_data']['image'][image_index]
                 w, h = img.size
-                crop_w, crop_h = cropped_img.size
-                shorter_side = min(w, h)
-                longer_crop_side = max(crop_w, crop_h)
-                zoom_factor = max(1, (shorter_side / longer_crop_side * 0.8))
-                new_w = int(crop_w * zoom_factor)
-                new_h = int(crop_h * zoom_factor)
-                new_safe_h, new_safe_w = compute_crop_scaled_size(h, w, new_h, new_w)
-                if new_safe_h != new_h or new_safe_w != new_w:
-                    print(
-                        f"[DEBUG] Crop Image Size Adjusted: "
-                        f"from ({new_h, new_w}) "
-                        f"to ({new_safe_h, new_safe_w}) "
-                        f"with scale ({new_safe_h / new_h:.2f}, "
-                        f"{new_safe_w / new_w:.2f})"
-                    )
+                bbox_absolute = [
+                    max(0, int(math.floor(bbox[0] * w))),
+                    max(0, int(math.floor(bbox[1] * h))),
+                    min(int(math.ceil(bbox[2] * w)), w),
+                    min(int(math.ceil(bbox[3] * h)), h),
+                ]
+                if bbox_absolute[0] >= bbox_absolute[2] or bbox_absolute[1] >= bbox_absolute[3]:
+                    raise ValueError(f"ZOOM IN BBOX IS INVALID {bbox=}, {bbox_absolute=}, {w=}, {h=}")
+                if (bbox_absolute[2] - bbox_absolute[0]) / (bbox_absolute[3] - bbox_absolute[1]) > 200 or (bbox_absolute[3] - bbox_absolute[1]) / (bbox_absolute[2] - bbox_absolute[0]) > 200:
+                    raise ValueError(f"ZOOM IN BBOX APSECT RATIO IS TOO LARGE {bbox=}, {bbox_absolute=}, {w=}, {h=}")
+                cropped_img = img.crop(bbox_absolute)
+                current_image = cropped_img
 
-                zoomed_img = cropped_img.resize((new_safe_w, new_safe_h), Image.BICUBIC)
-                current_image = zoomed_img
+                # # zoom in
+                # w, h = img.size
+                # crop_w, crop_h = cropped_img.size
+                # shorter_side = min(w, h)
+                # longer_crop_side = max(crop_w, crop_h)
+                # zoom_factor = max(1, (shorter_side / longer_crop_side * 0.8))
+                # new_w = int(crop_w * zoom_factor)
+                # new_h = int(crop_h * zoom_factor)
+                # new_safe_h, new_safe_w = compute_crop_scaled_size(h, w, new_h, new_w)
+                # if new_safe_h != new_h or new_safe_w != new_w:
+                #     print(
+                #         f"[DEBUG] Crop Image Size Adjusted: "
+                #         f"from ({new_h, new_w}) "
+                #         f"to ({new_safe_h, new_safe_w}) "
+                #         f"with scale ({new_safe_h / new_h:.2f}, "
+                #         f"{new_safe_w / new_w:.2f})"
+                #     )
+
+                # zoomed_img = cropped_img.resize((new_safe_w, new_safe_h), Image.BICUBIC)
+                # current_image = zoomed_img
             
             elif tool_name == "image_rotate_tool":
                 # Rotate the image
@@ -149,7 +164,7 @@ class VisualToolBoxV2(ToolBase):
                 raise ValueError(f"Unknown tool name: {tool_name}")
             # Prepare the observation
             obs = {
-                "prompt": "\n<|im_start|>user\n" + "<tool_response>" +"<image>" + "</tool_response>" + "<|im_end|>\n<|im_start|>assistant\n",
+                "prompt": "\n<|im_start|>user\n" + "<tool_response>" +"<image>" + self.user_prompt + "</tool_response>" + "<|im_end|>\n<|im_start|>assistant\n",
                 "multi_modal_data": {"image": [current_image]}
             }
             reward = 0.0  # Reward for successful tool call with correct JSON

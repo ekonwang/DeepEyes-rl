@@ -20,9 +20,9 @@ def _default_compute_score(data_source, solution_str, ground_truth, extra_info=N
 
         res = gsm8k.compute_score(solution_str, ground_truth)
     elif data_source in ["lighteval/MATH", "DigitalLearningGmbH/MATH-lighteval"]:
-        from . import math
+        from . import math_score
 
-        res = math.compute_score(solution_str, ground_truth)
+        res = math_score.compute_score(solution_str, ground_truth)
         # [Optional] Math-Verify Integration
         # For enhanced accuracy, consider utilizing Math-Verify (https://github.com/huggingface/Math-Verify).
         # Note: Math-Verify needs to be manually installed via pip: `pip install math-verify`.
@@ -72,6 +72,27 @@ def _default_compute_score(data_source, solution_str, ground_truth, extra_info=N
     elif data_source in ['thinklite_eureka', 'xince']:
         from . import vl_agent
         res = vl_agent.compute_score_math(solution_str, ground_truth, extra_info)
+
+    elif data_source in ['pixmo-points-image']:
+        from . import vl_agent
+        res = vl_agent.compute_score_counting(solution_str, ground_truth, extra_info)
+
+    elif data_source in ['pixmo-docs-chart', 'charxiv']:
+        from . import vl_agent
+        res = vl_agent.compute_score_chart(solution_str, ground_truth, extra_info)
+
+    elif data_source in ['thyme-2rounds', 'vstar_bench', 'thyme-rl', 'hrbench_4k']:
+        from . import vl_agent
+        # res = vl_agent.compute_score_crop(solution_str, ground_truth, extra_info)
+        res = vl_agent.compute_score(solution_str, ground_truth, extra_info)
+
+    elif data_source in ['maze']:
+        from . import vl_agent
+        res = vl_agent.compure_score_maze(solution_str, ground_truth, extra_info)
+    
+    elif data_source in ['google_map']:
+        from . import search_agent
+        res = search_agent.compure_score_search(solution_str, ground_truth, extra_info)
 
     elif data_source in ["frozenlake"]:
         res = 0.0

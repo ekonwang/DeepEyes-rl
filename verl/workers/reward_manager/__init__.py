@@ -16,3 +16,8 @@ from .batch import BatchRewardManager
 from .dapo import DAPORewardManager
 from .naive import NaiveRewardManager
 from .prime import PrimeRewardManager
+from .naive_parallel import NaiveParallelRewardManager
+
+# Backward-compat alias: some callers use `NativeParallelRewardManager` (typo)
+# Provide an alias so `from verl.workers.reward_manager import NativeParallelRewardManager` works.
+NativeParallelRewardManager = NaiveParallelRewardManager

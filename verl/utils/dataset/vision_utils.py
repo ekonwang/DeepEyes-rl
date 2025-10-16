@@ -17,15 +17,23 @@ from typing import Optional, Union
 
 import torch
 from PIL import Image
+from PIL import PngImagePlugin
+MaximumDecompressizedSize = 1024
+MegaByte = 2 ** 20
+PngImagePlugin.MAX_TEXT_CHUNK = MaximumDecompressizedSize * MegaByte
 from qwen_vl_utils import fetch_image, fetch_video
-
 
 def process_raw_image(image: dict):
     from PIL import Image
     from io import BytesIO
 
     if isinstance(image, dict):
-        image = Image.open(BytesIO(image['bytes']))
+        if image["bytes"] is not None:
+            image = Image.open(BytesIO(image['bytes']))
+        elif image["path"] is not None:
+            image = Image.open(image["path"])
+        else:
+            raise ValueError("Image dict must contain either 'bytes' or 'path' key.")
 
     if isinstance(image, Image.Image):
         return image.convert("RGB")
@@ -41,7 +49,12 @@ def process_image(image: Union[dict, Image.Image]) -> Image.Image:
 
     if "bytes" in image:
         assert "image" not in image, "Cannot have both `bytes` and `image`"
-        image["image"] = Image.open(BytesIO(image["bytes"]))
+        if image["bytes"] is not None:
+            image["image"] = Image.open(BytesIO(image["bytes"]))
+        elif image["path"] is not None:
+            image["image"] = Image.open(image["path"])
+        else:
+            raise ValueError("Image dict must contain either 'bytes' or 'path' key.")
 
     return fetch_image(image)
 

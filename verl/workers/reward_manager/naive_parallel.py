@@ -13,6 +13,8 @@
 # limitations under the License.
 
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+import os
 
 import torch
 
@@ -22,7 +24,7 @@ from verl.utils.reward_score import _default_compute_score
 import json
 import datetime
 
-class NaiveRewardManager:
+class NaiveParallelRewardManager:
     """The reward manager."""
 
     def __init__(self, tokenizer, num_examine, compute_score=None, reward_fn_key="data_source") -> None:
@@ -53,37 +55,55 @@ class NaiveRewardManager:
 
         already_print_data_sources = {}
 
+        # Build payloads sequentially to preserve order and avoid race in decoding
+        payloads = []  # list of tuples: (data_source, response_str, ground_truth, extra_info)
+        records = []   # list of tuples for ordered aggregation: (i, valid_response_length, response_str, ground_truth, data_source)
+
         for i in range(len(data)):
             data_item = data[i]  # DataProtoItem
 
             prompt_ids = data_item.batch["prompts"]
-
             prompt_length = prompt_ids.shape[-1]
 
-            valid_prompt_length = data_item.batch["attention_mask"][:prompt_length].sum()
+            attn = data_item.batch["attention_mask"]
+            valid_prompt_length = int(attn[:prompt_length].sum().item())
             valid_prompt_ids = prompt_ids[-valid_prompt_length:]
 
             response_ids = data_item.batch["responses"]
-            valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
+            valid_response_length = int(attn[prompt_length:].sum().item())
             valid_response_ids = response_ids[:valid_response_length]
 
-            # decode
+            # decode (keep prompt_str for parity though not printed by default)
             prompt_str = self.tokenizer.decode(valid_prompt_ids)
             response_str = self.tokenizer.decode(valid_response_ids)
 
             ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
-
             data_source = data_item.non_tensor_batch[self.reward_fn_key]
-
             extra_info = data_item.non_tensor_batch.get("extra_info", None)
 
-            score = self.compute_score(
-                data_source=data_source,
-                solution_str=response_str,
-                ground_truth=ground_truth,
-                extra_info=extra_info,
+            payloads.append((data_source, response_str, ground_truth, extra_info))
+            records.append((i, valid_response_length, response_str, ground_truth, data_source))
+
+        # Define scoring function for threads
+        def _score_one(p):
+            ds, resp, gt, extra = p
+            return self.compute_score(
+                data_source=ds,
+                solution_str=resp,
+                ground_truth=gt,
+                extra_info=extra,
             )
 
+        # Parallel compute with order-preserving map
+        num_workers = int(os.getenv("REWARD_MANAGER_WORKERS", "8"))
+        if num_workers > 1 and len(payloads) > 1:
+            with ThreadPoolExecutor(max_workers=num_workers) as ex:
+                results = list(ex.map(_score_one, payloads))
+        else:
+            results = [_score_one(p) for p in payloads]
+
+        # Aggregate sequentially to keep behavior identical and maintain order
+        for (i, vrl, resp_str, gt, ds), score in zip(records, results):
             if isinstance(score, dict):
                 reward = score["score"]
                 # Store the information including original reward
@@ -92,20 +112,21 @@ class NaiveRewardManager:
             else:
                 reward = score
 
-            reward_tensor[i, valid_response_length - 1] += reward
+            if vrl > 0:
+                reward_tensor[i, vrl - 1] += reward
 
             # eos_idx = torch.nonzero(action_or_attn_mask[i, prompt_length: prompt_length + valid_response_length])[-1]
             # reward_tensor[i, eos_idx] = score
 
-            if data_source not in already_print_data_sources:
-                already_print_data_sources[data_source] = 0
+            if ds not in already_print_data_sources:
+                already_print_data_sources[ds] = 0
 
-            if already_print_data_sources[data_source] < self.num_examine:
-                already_print_data_sources[data_source] += 1
+            if already_print_data_sources[ds] < self.num_examine:
+                already_print_data_sources[ds] += 1
                 print(f"{len(data)=}")
                 # print("[prompt]", prompt_str)
-                print("[response]", response_str)
-                print("[ground_truth]", ground_truth)
+                print("[response]", resp_str)
+                print("[ground_truth]", gt)
                 if isinstance(score, dict):
                     for key, value in score.items():
                         print(f"[{key}]", value)

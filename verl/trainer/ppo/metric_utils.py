@@ -134,6 +134,19 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
         "prompt_length/min": torch.min(prompt_length).detach().item(),
         "prompt_length/clip_ratio": torch.mean(torch.eq(prompt_length, max_prompt_length).float()).detach().item(),
     }
+
+    # if "reward_extra_infos_dict" in batch.batch.keys() and isinstance(batch.batch["reward_extra_infos_dict"], dict):
+    #     for key in batch.batch["reward_extra_infos_dict"].keys():
+    #         metrics[f"critic/score/{key}"] = torch.mean(batch.batch["reward_extra_infos_dict"][key]).detach().item()
+
+    if "acc_reward" in batch.batch.keys():
+        metrics["critic/score/acc_reward"] = torch.mean(batch.batch["acc_reward"]).detach().item()
+    if "format_reward" in batch.batch.keys():
+        metrics["critic/score/format_reward"] = torch.mean(batch.batch["format_reward"]).detach().item()
+    if "tool_reward" in batch.batch.keys():
+        metrics["critic/score/tool_reward"] = torch.mean(batch.batch["tool_reward"]).detach().item()
+    if "no_tool_reward" in batch.batch.keys():
+        metrics["critic/score/no_tool_reward"] = torch.mean(batch.batch["no_tool_reward"]).detach().item()
     return metrics
 
 

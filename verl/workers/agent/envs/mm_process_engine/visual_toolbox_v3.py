@@ -72,7 +72,7 @@ class VisualToolBoxV3(ToolBase):
             error_msg = f"Invalid tool call format: {action.strip()}. Error: {e}"
             return [{"role": "user", "content": error_msg}], 0.0, False, {}
         
-        print(f"DEBUG{tool_call=}")
+        print(f"[DEBUG-visual_toolbox_v3] {tool_call=}")
         cropped_bbox = self.get_bbox_2d(tool_call)
         if not cropped_bbox:
             user_msg = [{"role": "user", "content": "ZOOM IN ARGUMENTS ARE INVALID"}]

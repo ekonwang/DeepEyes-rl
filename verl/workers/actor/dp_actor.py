@@ -272,6 +272,10 @@ class DataParallelPPOActor(BasePPOActor):
         select_keys = ["responses", "input_ids", "attention_mask", "position_ids", "old_log_probs", "advantages", "action_mask"]
         if self.config.use_kl_loss:
             select_keys.append("ref_log_prob")
+
+        if self.config.ignore_exceed:
+            select_keys.append('exceed_mask')
+            
         batch = data.select(batch_keys=select_keys, strict=False).batch
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
 
@@ -318,6 +322,16 @@ class DataParallelPPOActor(BasePPOActor):
                     action_or_attn_mask = data['action_mask'] if 'action_mask' in data.keys() else data['attention_mask']
 
                     response_mask = action_or_attn_mask[:, -response_length:]
+
+                    if self.config.ignore_exceed:
+                        exceed_mask = data['exceed_mask']
+
+                        assert exceed_mask.shape[0] == response_mask.shape[0]
+
+                        # print(f"before: response_mask.shape: {response_mask.shape}, response_mask.sum(): {response_mask.sum()}, exceed_mask.shape: {exceed_mask.shape}, exceed_mask.sum(): {exceed_mask.sum()}")
+                        response_mask[exceed_mask] = 0
+                        # print(f"after: response_mask.shape: {response_mask.shape}, response_mask.sum(): {response_mask.sum()}")
+
                     old_log_prob = data["old_log_probs"]
                     advantages = data["advantages"]
 

@@ -163,6 +163,10 @@ class TaskRunner:
             from verl.workers.reward_manager import NaiveRewardManager
 
             reward_manager_cls = NaiveRewardManager
+        elif reward_manager_name == "native_parallel":
+            from verl.workers.reward_manager import NativeParallelRewardManager
+
+            reward_manager_cls = NativeParallelRewardManager
         elif reward_manager_name == "prime":
             from verl.workers.reward_manager import PrimeRewardManager
 
@@ -182,7 +186,7 @@ class TaskRunner:
         reward_kwargs = dict(config.reward_model.get("reward_kwargs", {}))
         reward_fn = reward_manager_cls(
             tokenizer=tokenizer,
-            num_examine=0,
+            num_examine=3,
             compute_score=compute_score,
             reward_fn_key=config.data.reward_fn_key,
             **reward_kwargs,

@@ -188,7 +188,7 @@ def compute_response_mask(data: DataProto):
     return action_or_attn_mask[:, -response_length:]
 
 
-def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_repeat=1, norm_adv_by_std_in_grpo=True):
+def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_repeat=1, norm_adv_by_std_in_grpo=True, exceed_mask=None):
     # Back-compatible with trainers that do not compute response mask in fit
     if "response_mask" not in data.batch:
         data.batch["response_mask"] = compute_response_mask(data)
@@ -1030,6 +1030,13 @@ class RayPPOTrainer:
                             reward_extra_infos_dict = {}
 
                         batch.batch["token_level_scores"] = reward_tensor
+                        # batch.batch["reward_extra_infos_dict"] = {}
+                        try:
+                            for key in reward_extra_infos_dict.keys():
+                                batch.batch[key] = reward_extra_infos_dict[key]
+                            # batch.batch["reward_extra_infos_dict"][key] = reward_extra_infos_dict[key]
+                        except:
+                            pass
 
                         print(f"{list(reward_extra_infos_dict.keys())=}")
                         if reward_extra_infos_dict:
@@ -1044,6 +1051,10 @@ class RayPPOTrainer:
                         else:
                             batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
 
+                        exceed_mask = None
+                        if self.config.actor_rollout_ref.actor.ignore_exceed:
+                            exceed_mask = batch.batch['exceed_mask']
+
                         # compute advantages, executed on the driver process
                         norm_adv_by_std_in_grpo = self.config.algorithm.get(
                             "norm_adv_by_std_in_grpo", True
@@ -1054,6 +1065,7 @@ class RayPPOTrainer:
                             gamma=self.config.algorithm.gamma,
                             lam=self.config.algorithm.lam,
                             num_repeat=self.config.actor_rollout_ref.rollout.n,
+                            exceed_mask=exceed_mask,
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                         )
 

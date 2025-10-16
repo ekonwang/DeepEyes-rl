@@ -1,15 +1,14 @@
 import numpy as np
 import copy
-import math
 from verl.workers.agent.tool_envs import ToolBase
 from typing import Optional, List, Dict, Any
 from PIL import Image
 import re
 import json
-from verl.workers.agent.envs.mm_process_engine.prompt import PROMPT
+from verl.workers.agent.envs.drawing.prompt import PROMPT
 from math import ceil, floor
-# 临时修复
-# ToolBase.registry = {}
+from PIL import Image, ImageDraw, ImageFont
+import math
 
 def compute_crop_scaled_size(resize_h, resize_w, crop_h, crop_w, max_len=32768, add_len=4000):
     """
@@ -38,11 +37,9 @@ def compute_crop_scaled_size(resize_h, resize_w, crop_h, crop_w, max_len=32768, 
 
     return scaled_h, scaled_w
 
-class VisualToolBoxV2(ToolBase):
-    name = "visual_toolbox_v2"
-    # user_prompt = "Here is the cropped image returned after you calling the function {}.\nIf the images provided above are sufficient to answer the user's question, please put your final answer within <answer></answer>. Otherwise you can continue to call tools within <tool_call></tool_call>."
-
-    user_prompt = PROMPT.USER_PROMPT_V2
+class VisualMarkingTool(ToolBase):
+    name = "image_marking_tool"
+    user_prompt = PROMPT.USER_PROMPT_COUNT_V2
     def __init__(self, _name, _desc, _params, **kwargs):
         super().__init__(
             name=self.name,
@@ -71,7 +68,7 @@ class VisualToolBoxV2(ToolBase):
         tool_call_match = re.findall(r'<tool_call>(.*?)</tool_call>', action_string, re.DOTALL)
         return tool_call_match[-1] if tool_call_match else None
 
-    def execute(self, action_string, vllm_input_list, **kwargs) -> tuple:
+    def execute(self, action_string: str, vllm_input_list, **kwargs) -> tuple:
         """
         Execute the tool functionality based on the action string.
         
@@ -103,63 +100,64 @@ class VisualToolBoxV2(ToolBase):
             tool_name = tool_call["name"]
             args = tool_call["arguments"]
         
-            if tool_name == "image_zoom_in_tool":
+            if tool_name == "image_marking_tool":
                 # Zoom in by cropping the image
+                points = args["points"]
+                if 'index' in args.keys():
+                    image_index = args['index']
+                else:
+                    image_index = 0
                 # image_path = args["image_path"]
-                bbox = args["bbox_2d"]
-                bbox = self.maybe_resize_bbox(*bbox)
+                # img = Image.open(image_path)
+                img = vllm_input_list['multi_modal_data']['image'][image_index]
+                # if not is_valid_point(points, img):
+                #     raise ValueError(f"POINT ARGUMENTS ARE INVALID")
+                marked_img = self.draw_numbered_points(img, points)
+                marked_img_idx = len(vllm_input_list['multi_modal_data']['image'])
+                current_image = marked_img
+                # import time
+                # cur_time = int(round(time.time() * 1000))
+                # marked_img.save(f'/mnt/lzy/DeepEyes/logs/debug_images/marked_image_{cur_time}.jpeg', format='JPEG')
+                current_image = marked_img
+            elif tool_name == "image_zoom_in_tool":
+                bbox_2d = args["bbox_2d"]
+                bbox = self.maybe_resize_bbox(*bbox_2d)
                 if not bbox:
                     raise ValueError(f"ZOOM IN ARGUMENTS ARE INVALID")
-                # img = Image.open(image_path)
-                img = self.multi_modal_data['image'][0]
+                
+                factor = args["factor"]
+                img = vllm_input_list['multi_modal_data']['image'][0]
                 cropped_img = img.crop(bbox)
-                # current_image = cropped_img
 
-                # zoom in
                 w, h = img.size
                 crop_w, crop_h = cropped_img.size
-                shorter_side = min(w, h)
-                longer_crop_side = max(crop_w, crop_h)
-                zoom_factor = max(1, (shorter_side / longer_crop_side * 0.8))
-                new_w = int(crop_w * zoom_factor)
-                new_h = int(crop_h * zoom_factor)
+                new_w = int(crop_w * factor)
+                new_h = int(crop_h * factor)
                 new_safe_h, new_safe_w = compute_crop_scaled_size(h, w, new_h, new_w)
-                if new_safe_h != new_h or new_safe_w != new_w:
-                    print(
-                        f"[DEBUG] Crop Image Size Adjusted: "
-                        f"from ({new_h, new_w}) "
-                        f"to ({new_safe_h, new_safe_w}) "
-                        f"with scale ({new_safe_h / new_h:.2f}, "
-                        f"{new_safe_w / new_w:.2f})"
-                    )
-
                 zoomed_img = cropped_img.resize((new_safe_w, new_safe_h), Image.BICUBIC)
                 current_image = zoomed_img
-            
-            elif tool_name == "image_rotate_tool":
-                # Rotate the image
-                # image_path = args["image_path"]
-                angle = args["angle"]
-                # img = Image.open(image_path)
-                img = self.multi_modal_data['image'][0]
-                rotated_img = img.rotate(angle)
-                current_image = rotated_img
-                
+                marked_img_idx = len(vllm_input_list['multi_modal_data']['image'])
+
             else:
                 raise ValueError(f"Unknown tool name: {tool_name}")
             # Prepare the observation
             obs = {
-                "prompt": "\n<|im_start|>user\n" + "<tool_response>" +"<image>" + "</tool_response>" + "<|im_end|>\n<|im_start|>assistant\n",
+                "prompt": "\n<|im_start|>user\n" + "<tool_response>" + f'<index {marked_img_idx}>' + "<image>" + "</tool_response>" + "<|im_end|>\n<|im_start|>assistant\n",
                 "multi_modal_data": {"image": [current_image]}
             }
             reward = 0.0  # Reward for successful tool call with correct JSON
             done = False
             info = {"status": "success", "tool_used": tool_name}
-            print(f'[DEBUG-visual_toolbox_v2] SUCCESS ACTION {action_string=}')
+            print(f'[DEBUG-image_marking_tool] SUCCESS ACTION {action_string=}')
+            # save to /mnt/lzy/DeepEyes/logs/success.log
+            # with open('/mnt/lzy/DeepEyes/logs/success.log', 'a') as f:
+            #     f.write(f'[DEBUG-image_marking_tool] SUCCESS ACTION {action_string}\n')
             return obs, reward, done, info
         except Exception as e:
             # Return an error observation if something goes wrong
-            print(f'[DEBUG-visual_toolbox_v2] Execute WRONG - {str(e)} {action_string=}')
+            print(f'[DEBUG-image_marking_tool] Execute WRONG - {str(e)} {action_string=}')
+            with open('/mnt/lzy/DeepEyes/logs/error.log', 'a') as f:
+                f.write(f'[DEBUG-image_marking_tool] Execute WRONG - {str(e)} {action_string}\n')
             obs = "\n<|im_start|>user\n" + f"Error: {str(e)}" + "<|im_end|>\n<|im_start|>assistant\n"
             reward = 0.0  # No reward for failed execution
             done = False
@@ -174,19 +172,6 @@ class VisualToolBoxV2(ToolBase):
         
         self.height = self.multi_modal_data['image'][0].height
         self.width = self.multi_modal_data['image'][0].width
-
-    def validate_bbox(self, left, top, right, bottom):
-        try:
-            assert left < right and bottom > top, f'invalid shape for {left=}, {top=}, {right=}, {bottom=}'
-            height = bottom - top
-            width = right - left
-            assert max(height, width) / min(height, width) <= 100, f"aspect ratio error: {left=}, {top=}, {right=}, {bottom=}"
-            assert min(height, width) > 30, f"{height=}, {width=} is too small"
-            return True
-        except Exception as err:
-            print(f' [ERROR vl_agent #2] {err=}')
-            return False
-
 
     def maybe_resize_bbox(self, left, top, right, bottom):
         left = max(0, left)
@@ -213,33 +198,134 @@ class VisualToolBoxV2(ToolBase):
             return [new_left, new_top, new_right, new_bottom]
         return [left, top, right, bottom]
 
+    def draw_numbered_points(self, img, points):
+        """
+        在图像上绘制带数字序号的点
+        :param img: PIL.Image对象
+        :param points: 点坐标列表 [[x1,y1], [x2,y2], ...]
+        :return: 绘制后的新图像
+        """
+        # 创建图像副本和绘图对象
+        img_copy = img.copy()
+        draw = ImageDraw.Draw(img_copy)
+        
+        # 尝试加载字体（支持跨平台）
+        try:
+            # 尝试常见字体
+            font = ImageFont.truetype("arial.ttf", 20)
+        except IOError:
+            try:
+                font = ImageFont.truetype("DejaVuSans.ttf", 20)
+            except:
+                # 使用默认字体（大小不可调）
+                font = ImageFont.load_default()
+        
+        # 设置颜色
+        point_color = (255, 0, 0)  # 红色圆点
+        text_color = (255, 255, 255)  # 白色文本
+        
+        # 遍历所有点
+        for i, point in enumerate(points, start=1):
+            # 验证点坐标
+            if len(point) < 2:
+                continue
+                
+            x, y = point[:2]  # 取前两个值作为坐标
+
+            if x < 1 and y < 1:
+                x = int(x * img.width)
+                y = int(y * img.height)
+            else:
+                x = int(x)
+                y = int(y)
+
+            # 检查坐标是否在图像范围内
+            if 0 <= x < img.width and 0 <= y < img.height:
+                # 绘制红色圆点
+                point_radius = 5
+                draw.ellipse(
+                    [x - point_radius, y - point_radius,
+                    x + point_radius, y + point_radius],
+                    fill=point_color
+                )
+                
+                # 绘制带背景的数字标签
+                text = str(i)
+                text_position = (x + 8, y - 10)  # 点在数字左侧
+                
+                # 计算文本尺寸（不同字体处理方法不同）
+                if hasattr(font, 'getbbox'):  # Pillow 9.2.0+
+                    bbox = font.getbbox(text)
+                    text_width = bbox[2] - bbox[0]
+                    text_height = bbox[3] - bbox[1]
+                else:  # 旧版本Pillow
+                    text_width, text_height = font.getsize(text)
+                
+                # 绘制文本背景
+                bg_margin = 2
+                draw.rectangle(
+                    [text_position[0] - bg_margin, 
+                    text_position[1] - bg_margin,
+                    text_position[0] + text_width + bg_margin, 
+                    text_position[1] + text_height + bg_margin],
+                    fill=point_color
+                )
+                
+                # 绘制文本
+                draw.text(text_position, text, fill=text_color, font=font)
+        
+        return img_copy
 
 if __name__ == "__main__":
     # Example usage (for testing)
-    tool = VisualToolBox("visual_toolbox", "Tool for image processing", {})
+    tool = VisualMarkingTool("visual_toolbox", "Tool for image processing", {})
     
     # Test zoom in tool (should return reward=0.1)
     zoom_in_action = """
     <tool_call>
-    {"name": "image_zoom_in_tool", "arguments": {"image_path": "test.jpg", "bbox": [10, 10, 100, 100]}}
+    {"name": "image_marking_tool", "arguments": {"image_path": "/mnt/lzy/DeepEyes/1625003769.8128223.jpeg", "points": [
+    [30, 12],
+    [36, 96],
+    [38, 96],
+    [41, 96],
+    [43, 97],
+    [46, 96],
+    [46, 85],
+    [43, 84],
+    [41, 85],
+    [38, 84],
+    [34, 82],[31, 84]]}}
+    </tool_call>
+    """
+    import pdb; pdb.set_trace()
+    obs, reward, done, info = tool.execute(zoom_in_action)
+    print(f"Zoom in result - Reward: {reward}, Info: {info}")
+    
+
+    # Test zoom in tool (should return reward=0.1)
+    zoom_in_action = """
+    <tool_call>
+    {"name": "image_marking_tool", "arguments": {"image_path": "/mnt/lzy/DeepEyes/1625003769.8128223.jpeg", "points": [
+    [30.1234, 12.23],
+    [36.3, 96.0],
+    [38.532, 96.33],
+    [41.02, 96.63],
+    [43.86, 97.59],
+    [46.01, 96.0],
+    [46, 85],
+    [43, 84],
+    [41, 85],
+    [38, 84],
+    [34, 82],[31, 84]]}}
     </tool_call>
     """
     obs, reward, done, info = tool.execute(zoom_in_action)
     print(f"Zoom in result - Reward: {reward}, Info: {info}")
-    
-    # Test rotate tool (should return reward=0.1)
-    rotate_action = """
-    <tool_call>
-    {"name": "image_rotate_tool", "arguments": {"image_path": "test.jpg", "angle": 90}}
-    </tool_call>
-    """
-    obs, reward, done, info = tool.execute(rotate_action)
-    print(f"Rotate result - Reward: {reward}, Info: {info}")
-    
+
     # Test invalid JSON (should return reward=0.0)
     invalid_action = """
     <tool_call>
-    {"name": "image_rotate_tool", "arguments": {"image_path": "test.jpg", "angle": 90}
+    {"name": "image_marking_tool", "arguments": {"image_path": "/mnt/lzy/DeepEyes/625003769.8128223.jpeg", "angle": 90}
     </tool_call>
     """
     obs, reward, done, info = tool.execute(invalid_action)

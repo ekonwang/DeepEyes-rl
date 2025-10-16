@@ -15,6 +15,38 @@ from verl.utils.dataset.vision_utils import process_image, process_raw_image, pr
 from verl.utils.torch_functional import pad_2d_list_to_length
 from verl.workers.agent.tool_envs import ToolBase
 
+
+import os, atexit, tempfile
+
+# 自选举方式，只选择一个 tp 组进行全局打印
+def _elect_global_debug_leader(tag=None):
+    tag = tag or os.getenv('VERL_DEBUG_TAG', 'default')
+    dir_ = os.getenv('VERL_DEBUG_DIR', tempfile.gettempdir())
+    path = os.path.join(dir_, f'verl_debug_leader_{tag}')
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        with os.fdopen(fd, 'w') as f:
+            f.write(str(os.getpid()))
+        def _cleanup():
+            try:
+                # 仅删除自己创建的
+                with open(path) as r:
+                    owner = r.read().strip()
+                if owner == str(os.getpid()):
+                    os.unlink(path)
+            except Exception:
+                pass
+        atexit.register(_cleanup)
+        return True
+    except FileExistsError:
+        return False
+    except Exception:
+        # 出错时保守起见，禁用全局打印
+        return False
+
+IS_GLOBAL_DEBUG_LEADER = _elect_global_debug_leader()
+
+
 def _strip_system_block(text: str) -> str:
     """
     删除 text 中第一个 <|im_start|>system ... <|im_end|> 区块（含标签），
@@ -116,6 +148,7 @@ def agent_rollout_loop(config, vllm_engine, vllm_inputs, prompts, multi_modal_in
     agent_sampling_params.n = 1
     agent_sampling_params.include_stop_str_in_output = True
     max_generated_tokens = min(config.agent.single_response_max_tokens, config.response_length)
+    print(f' [DEBUG GEN] {max_generated_tokens=} {config.response_length=}')
     agent_sampling_params.max_tokens = max_generated_tokens
 
     # support custom stop specified in dataset, like </search>, ```, etc.
@@ -178,6 +211,8 @@ def agent_rollout_loop(config, vllm_engine, vllm_inputs, prompts, multi_modal_in
 
     pg = vllm_ps.get_tp_group()
     max_total_length = config.prompt_length + config.response_length
+    max_image_num = config.agent.max_vllm_images
+    exceed_indices = []
     for step in range(config.agent.max_turns):
         print(f' [DEBUG 000] {step=}, total={batch_size}, n={sampling_params.n}, num_active={sum(active_mask)}')
         if sum(active_mask) == 0:
@@ -192,17 +227,26 @@ def agent_rollout_loop(config, vllm_engine, vllm_inputs, prompts, multi_modal_in
         )
 
         if pg.is_first_rank:
-            obs_results = env.step(active_indices, actions)
+            obs_results = env.step(active_indices, actions, active_vllm_inputs)
         else:
             obs_results = None
 
         obs_results = pg.broadcast_object(obs_results)
-        observations, rewards, dones, info = obs_results
+        observations, rewards, dones, infos = obs_results
+        # print(f"[DEBUG Rollout infos] {len(observations)=}, {len(rewards)=}, {len(dones)=}, {len(infos)=}")
 
-
-        for idx, obs, act, rew, done in zip(active_indices, observations, actions, rewards, dones):
+        for idx, obs, act, rew, done, info in zip(active_indices, observations, actions, rewards, dones, infos):
             # process response token ids
             response_token_ids = torch.tensor(act.outputs[0].token_ids, dtype=torch.int64, device=running_states[idx].device)
+
+            # --- 0929 debug for empty response --- #
+            # if idx == 0 and IS_GLOBAL_DEBUG_LEADER:
+            #     print(f"[DEBUG Rollout Str] {act.outputs[0].text=}")
+            #     print(f"[DEBUG Rollout Ids] {response_token_ids=}")
+            #     print(f'[DEBUG Rollout Running States] {running_states[idx].shape=}, {running_states[idx]=}')
+            #     print(f'[DEBUG Rollout Running After Concate] {torch.cat([running_states[idx], response_token_ids]).shape=}, {torch.cat([running_states[idx], response_token_ids])=}')
+            #     print(f'[DEBUG Rollout Running STR] {tokenizer.decode(torch.cat([running_states[idx], response_token_ids]), skip_special_tokens=True)=}')
+
             running_states[idx] = torch.cat([running_states[idx], response_token_ids])
             vllm_input_list[idx]['prompt_token_ids'] = _concat_vllm_input(
                 vllm_input_list[idx]['prompt_token_ids'], 
@@ -218,6 +262,13 @@ def agent_rollout_loop(config, vllm_engine, vllm_inputs, prompts, multi_modal_in
             running_action_masks[idx] = torch.cat([running_action_masks[idx], action_mask])
             running_attn_masks[idx] = torch.cat([running_attn_masks[idx], action_mask])
 
+            if step == config.agent.max_turns - 1 and not done:
+                exceed_indices.append(idx)
+            if len(vllm_input_list[idx]['multi_modal_data']['image']) >= max_image_num:
+                exceed_indices.append(idx)
+            if running_states[idx].shape[-1] >= max_total_length - 2000 or len(vllm_input_list[idx]['prompt_token_ids']) >= max_total_length - 2000:
+                exceed_indices.append(idx)
+            
             # Ensure the last token is not obs
             if running_states[idx].shape[-1] >= max_total_length or len(vllm_input_list[idx]['prompt_token_ids']) >= max_total_length:
                 active_mask[idx] = False
@@ -300,6 +351,24 @@ def agent_rollout_loop(config, vllm_engine, vllm_inputs, prompts, multi_modal_in
     reward_tensor = pad_2d_list_to_length(reward_tensor_list, 0.0, max_total_length).to(target_device)
 
     tool_call_tensor = torch.tensor(tool_call_cnt_list, dtype=torch.float32).to(target_device).unsqueeze(1)
+
+    exceed_indices = torch.tensor(exceed_indices, dtype=torch.int64).to(target_device)
+    exceed_mask = torch.zeros((batch_size * sampling_params.n,), dtype=torch.bool).to(target_device)
+    exceed_mask[exceed_indices] = True
+
+    # --- 0928 debug for empty response --- #
+    # 单节点多实例只打印一个 tp 组
+    # if IS_GLOBAL_DEBUG_LEADER:
+    #     decoded_state_tensor = tokenizer.decode(state_tensor[0, :], skip_special_tokens=True)
+    #     print(f"[DEBUG Rollout Input] {prompts.batch['input_ids'].shape=}")
+    #     print(f"[DEBUG Rollout State Shape] {state_tensor.shape=}")
+    #     print(f"[DEBUG Rollout State Ids] {state_tensor[0, :]=}")
+    #     print(f"[DEBUG Rollout State Text] {decoded_state_tensor=}")
+
+    #     response_tensor = state_tensor[:, -config.response_length: ]
+    #     print(f'[DEBUG Response Shape] {response_tensor.shape=}')
+    #     print(f'[DEBUG Response Text] {tokenizer.decode(response_tensor[0, :], skip_special_tokens=True)=}')
+
     return DataProto.from_dict(
         tensors={
             "response": state_tensor[:, -config.response_length: ],
@@ -308,12 +377,13 @@ def agent_rollout_loop(config, vllm_engine, vllm_inputs, prompts, multi_modal_in
             "position_ids": position_ids_tensor,
             "env_reward": reward_tensor[:, -config.response_length: ],
             "tool_cnt": tool_call_tensor,
+            'exceed_mask': exceed_mask.contiguous(),
         },
         non_tensors={"multi_modal_inputs": mm_input_list} if processor is not None else None
     )
 
 
-def execute_tool_call(sample, tokenizer=None, processor=None, pbar=None):
+def execute_tool_call(sample, tokenizer=None, processor=None, pbar=None, vllm_input_list=None):
     action_string = sample.get('action', '')
     tool = sample.get('tool', None)
 
@@ -321,7 +391,8 @@ def execute_tool_call(sample, tokenizer=None, processor=None, pbar=None):
     if action_string == '' or tool is None:
         return {}, 0.0, True, {}
 
-    tool_result, reward, done, info = tool.execute(action_string)
+    tool_result, reward, done, info = tool.execute(action_string, vllm_input_list)
+    # tool_result, reward, done, info = tool.execute(action_string)
 
     # post-process
     if not tool_result:
@@ -393,7 +464,7 @@ class ParallelEnv:
         # type: List[ Dict[ Str, ToolBase subclasses ] ]
         self.tools = []
 
-    def step(self, active_indices, actions):
+    def step(self, active_indices, actions, vllm_input_list):
         """
         Input:
         - actions: vllm.RequestOutput
@@ -411,11 +482,12 @@ class ParallelEnv:
         """
         obs_list = [{}] * len(actions)
         reward_list = [0.0] * len(actions)
+        info_list = [{}] * len(actions)
         done_list = []
         valid_indices = []
         real_indices = []
         valid_actions = []
-        
+
         # 1. filtering valid actions
         for i, (idx, act) in enumerate(zip(active_indices, actions)):
             if act.outputs[0].finish_reason == 'length':
@@ -446,10 +518,11 @@ class ParallelEnv:
         if num_workers <= 1:
             for agi in agent_inputs:
                 subidx = agi['idx']
-                obs, reward, done, info = execute_tool_call(agi, self.tokenizer, self.processor, pbar=pbar)
+                obs, reward, done, info = execute_tool_call(agi, self.tokenizer, self.processor, pbar=pbar, vllm_input_list=vllm_input_list[subidx])
                 obs_list[subidx] = obs
                 reward_list[subidx] = reward
                 done_list[subidx] |= done
+                info_list[subidx] = info
         else:
             partial_tool_func = partial(execute_tool_call, tokenizer=self.tokenizer, processor=self.processor, pbar=pbar)
             with ThreadPoolExecutor(max_workers=num_workers) as executor:
@@ -460,8 +533,9 @@ class ParallelEnv:
                 obs_list[subidx] = obs
                 reward_list[subidx] = reward
                 done_list[subidx] |= done
+                info_list[subidx] = raw[3]
 
-        return obs_list, reward_list, done_list, {}
+        return obs_list, reward_list, done_list, info_list
 
     def reset(self, prompts, vllm_inputs, n=1, **kwargs):
         self.tools = []
