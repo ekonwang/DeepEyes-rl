@@ -106,10 +106,11 @@ class SearchAgentEnvV1(ToolBase):
     
 	def execute(self, action_string, vllm_input_list, **kwargs):
 		# obs_dict, step_reward, done, info
-		if "debug" in kwargs:
-			debug = kwargs["debug"]
-		else:
-			debug = False
+		debug = kwargs["debug"] if "debug" in kwargs else False
+		extra_info = kwargs["extra_info"] if "extra_info" in kwargs else None 
+		assert extra_info, "expect meaningful `extra_info` in tool env!!"
+		print(extra_info)
+
 		# TODO: remove this
 		# debug = True
 		

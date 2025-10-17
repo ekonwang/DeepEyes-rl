@@ -190,6 +190,7 @@ def agent_rollout_loop(config, vllm_engine, vllm_inputs, prompts, multi_modal_in
     active_mask = []
     mm_input_list = []
     tool_call_cnt_list = []
+    extra_info_list = []
 
     env = ParallelEnv(config.agent, tokenizer, processor)
     env.reset(prompts, vllm_inputs, n=sampling_params.n)
@@ -208,6 +209,7 @@ def agent_rollout_loop(config, vllm_engine, vllm_inputs, prompts, multi_modal_in
             active_mask.append(True)
             mm_input_list.append(deepcopy(multi_modal_inputs[i]))
             tool_call_cnt_list.append(0)
+            extra_info_list.append(prompts.non_tensor_batch['extra_info'])
 
     pg = vllm_ps.get_tp_group()
     max_total_length = config.prompt_length + config.response_length
@@ -220,6 +222,7 @@ def agent_rollout_loop(config, vllm_engine, vllm_inputs, prompts, multi_modal_in
 
         active_indices = [idx for idx, is_active in enumerate(active_mask) if is_active]
         active_vllm_inputs = [vinput for vinput, is_active in zip(vllm_input_list, active_mask) if is_active]
+        active_extra_infos = [extra_info for extra_info, is_active in zip(extra_info_list, active_mask) if is_active]
         actions = vllm_engine.generate(
             prompts=active_vllm_inputs,
             sampling_params=agent_sampling_params,
@@ -227,7 +230,7 @@ def agent_rollout_loop(config, vllm_engine, vllm_inputs, prompts, multi_modal_in
         )
 
         if pg.is_first_rank:
-            obs_results = env.step(active_indices, actions, active_vllm_inputs)
+            obs_results = env.step(active_indices, actions, active_vllm_inputs, active_extra_infos)
         else:
             obs_results = None
 
@@ -386,12 +389,14 @@ def agent_rollout_loop(config, vllm_engine, vllm_inputs, prompts, multi_modal_in
 def execute_tool_call(sample, tokenizer=None, processor=None, pbar=None, vllm_input_list=None):
     action_string = sample.get('action', '')
     tool = sample.get('tool', None)
+    extra_info = sample.get('extra_info', None)
+    assert extra_info, "expect meaningful extra info!!"
 
     # non-agent data
     if action_string == '' or tool is None:
         return {}, 0.0, True, {}
 
-    tool_result, reward, done, info = tool.execute(action_string, vllm_input_list)
+    tool_result, reward, done, info = tool.execute(action_string, vllm_input_list, extra_info=extra_info)
     # tool_result, reward, done, info = tool.execute(action_string)
 
     # post-process
@@ -464,7 +469,7 @@ class ParallelEnv:
         # type: List[ Dict[ Str, ToolBase subclasses ] ]
         self.tools = []
 
-    def step(self, active_indices, actions, vllm_input_list):
+    def step(self, active_indices, actions, vllm_input_list, extra_info_list=None):
         """
         Input:
         - actions: vllm.RequestOutput
@@ -487,9 +492,10 @@ class ParallelEnv:
         valid_indices = []
         real_indices = []
         valid_actions = []
+        valid_extra_infos = []
 
         # 1. filtering valid actions
-        for i, (idx, act) in enumerate(zip(active_indices, actions)):
+        for i, (idx, act, extra_info) in enumerate(zip(active_indices, actions, extra_info_list)):
             if act.outputs[0].finish_reason == 'length':
                 done_list.append(True)
                 continue
@@ -502,14 +508,16 @@ class ParallelEnv:
             real_indices.append(i)
             valid_indices.append(idx)
             valid_actions.append(act.outputs[0].text)
+            valid_extra_infos.append(extra_info)
 
         agent_inputs = []
-        for i, idx, action in zip(real_indices, valid_indices, valid_actions):
+        for i, idx, action, extra_info in zip(real_indices, valid_indices, valid_actions, valid_extra_infos):
             agent_inputs.append(dict(
                 idx=i,
                 valid_idx=idx,
                 action=action,
                 tool=self.tools[idx],
+                extra_info=extra_info
             ))
 
         # 2. executing actions (sync or async)
