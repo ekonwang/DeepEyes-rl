@@ -114,12 +114,12 @@ def _log_kv(debug: bool, title: str, obj: Any):
 	if debug:
 		print_hl(title)
 		try:
-			print(json.dumps(obj, ensure_ascii=False, indent=2))
+			print(json.dumps(obj, ensure_ascii=False))
 		except Exception:
 			print(str(obj))
 
 
-def crop_tool_core(original_img: Image, bbox_2d: List[float], label: Optional[str] = None, debug: bool = False, abs_scaling=1., bbox_normalize=False, crop_path = None) -> Dict[str, Any]:
+def crop_tool_core(original_img: Image, bbox_2d: List[float], label: Optional[str] = None, debug: bool = False, abs_scaling=1., bbox_normalize=False, crop_path = None, action=None, debug_info=None) -> Dict[str, Any]:
 	"""Core logic for image cropping and resizing using the original image path."""
 	try:
 		left, top, right, bottom = bbox_2d
@@ -142,6 +142,12 @@ def crop_tool_core(original_img: Image, bbox_2d: List[float], label: Optional[st
 			w_crop = right_px - left_px
 			h_crop = bottom_px - top_px
 
+		if w_crop == 0 or h_crop == 0:
+			raise ValueError("Crop dimensions must be non-zero")
+		aspect_ratio = max(w_crop, h_crop) / min(w_crop, h_crop)
+		if aspect_ratio > 128:
+			raise ValueError(f"Crop aspect ratio exceeds limit: {aspect_ratio:.2f}")
+		
 		new_w, new_h = smart_resize(w_crop, h_crop, factor=IMAGE_FACTOR)
 		cropped_image = cropped_image.resize((new_w, new_h), resample=Image.BICUBIC)
 
@@ -155,8 +161,11 @@ def crop_tool_core(original_img: Image, bbox_2d: List[float], label: Optional[st
 			_log_kv(True, "Crop saved", {
 				"bbox": bbox_2d,
 				"label": label,
+				"abs_scaling": abs_scaling,
 				"resized_wxh": [new_w, new_h],
-				"crop_path": crop_path
+				"crop_path": crop_path,
+				"action": action,
+				"debug_info": debug_info
 			})
 
 		return {

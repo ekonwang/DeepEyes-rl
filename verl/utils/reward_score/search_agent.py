@@ -5,7 +5,8 @@ import unicodedata
 from typing import Dict, Optional, Tuple, Any
 
 # from utils_gemini import chat_gemini
-from .utils_gpt import chat_4o_mini
+# from .utils_gpt import chat_4o_mini
+from .utils_api import chat_4o_mini
 from .utils import print_hl, print_error
 
 

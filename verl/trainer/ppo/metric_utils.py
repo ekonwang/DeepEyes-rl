@@ -184,15 +184,24 @@ def compute_throughout_metrics(batch: DataProto, timing_raw: Dict[str, float], n
 
 
 def compute_agent_metrics(batch: DataProto):
-    if 'tool_cnt' not in batch.batch.keys():
-        return {}
-
-    tool_cnt_tensor = batch.batch.pop('tool_cnt').detach().cpu()
-    return {
-        "agent/tool_call_mean": torch.mean(tool_cnt_tensor).item(),
-        "agent/tool_call_max": torch.max(tool_cnt_tensor).item(),
-        "agent/tool_call_min": torch.min(tool_cnt_tensor).item(),
+    metric_key_map = {
+        "tool_cnt": "tool_call",
+        "tool_success": "tool_success",
+        "tool_fail": "tool_fail",
+        "tool_fail_rate": "tool_fail_rate",
     }
+
+    agent_metrics = {}
+    for tensor_key, metric_name in metric_key_map.items():
+        if tensor_key not in batch.batch:
+            continue
+
+        tensor = batch.batch.pop(tensor_key).detach().cpu()
+        agent_metrics[f"agent/{metric_name}_mean"] = torch.mean(tensor).item()
+        agent_metrics[f"agent/{metric_name}_max"] = torch.max(tensor).item()
+        agent_metrics[f"agent/{metric_name}_min"] = torch.min(tensor).item()
+
+    return agent_metrics
 
 
 def bootstrap_metric(

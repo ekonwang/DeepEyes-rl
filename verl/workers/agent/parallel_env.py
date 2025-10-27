@@ -190,6 +190,9 @@ def agent_rollout_loop(config, vllm_engine, vllm_inputs, prompts, multi_modal_in
     active_mask = []
     mm_input_list = []
     tool_call_cnt_list = []
+    tool_call_success_list = []
+    tool_call_fail_list = []
+    tool_call_fail_rate_list = []
     extra_info_list = []
 
     env = ParallelEnv(config.agent, tokenizer, processor)
@@ -209,7 +212,10 @@ def agent_rollout_loop(config, vllm_engine, vllm_inputs, prompts, multi_modal_in
             active_mask.append(True)
             mm_input_list.append(deepcopy(multi_modal_inputs[i]))
             tool_call_cnt_list.append(0)
-            extra_info_list.append(prompts.non_tensor_batch['extra_info'])
+            tool_call_success_list.append(0)
+            tool_call_fail_list.append(0)
+            tool_call_fail_rate_list.append(0)
+            extra_info_list.append({})
 
     pg = vllm_ps.get_tp_group()
     max_total_length = config.prompt_length + config.response_length
@@ -281,6 +287,8 @@ def agent_rollout_loop(config, vllm_engine, vllm_inputs, prompts, multi_modal_in
                 active_mask[idx] = False
                 continue
             tool_call_cnt_list[idx] += 1
+            tool_call_success_list[idx] += info["tool_success"]
+            tool_call_fail_list[idx] += info["tool_fail"]
 
             # process obs tokens and images
             if 'prompt_token_ids_vllm' in obs.keys() and 'prompt_token_ids_model' in obs.keys():
@@ -321,6 +329,9 @@ def agent_rollout_loop(config, vllm_engine, vllm_inputs, prompts, multi_modal_in
 
             if running_states[idx].shape[-1] >= max_total_length or len(vllm_input_list[idx]['prompt_token_ids']) >= max_total_length:
                 active_mask[idx] = False
+    
+    for i in range(len(tool_call_success_list)):
+        tool_call_fail_rate_list[i] = tool_call_fail_list[i] / (tool_call_success_list[i] + tool_call_fail_list[i]) if (tool_call_success_list[i] + tool_call_fail_list[i]) else 0.
 
     env.close()
     target_device = prompts.batch['input_ids'].device
@@ -354,6 +365,9 @@ def agent_rollout_loop(config, vllm_engine, vllm_inputs, prompts, multi_modal_in
     reward_tensor = pad_2d_list_to_length(reward_tensor_list, 0.0, max_total_length).to(target_device)
 
     tool_call_tensor = torch.tensor(tool_call_cnt_list, dtype=torch.float32).to(target_device).unsqueeze(1)
+    tool_call_success_tensor = torch.tensor(tool_call_success_list, dtype=torch.float32).to(target_device).unsqueeze(1)
+    tool_call_fail_tensor = torch.tensor(tool_call_fail_list, dtype=torch.float32).to(target_device).unsqueeze(1)
+    tool_call_fail_rate_tensor = torch.tensor(tool_call_fail_rate_list, dtype=torch.float32).to(target_device).unsqueeze(1)
 
     exceed_indices = torch.tensor(exceed_indices, dtype=torch.int64).to(target_device)
     exceed_mask = torch.zeros((batch_size * sampling_params.n,), dtype=torch.bool).to(target_device)
@@ -380,6 +394,9 @@ def agent_rollout_loop(config, vllm_engine, vllm_inputs, prompts, multi_modal_in
             "position_ids": position_ids_tensor,
             "env_reward": reward_tensor[:, -config.response_length: ],
             "tool_cnt": tool_call_tensor,
+            "tool_success": tool_call_success_tensor,
+            "tool_fail": tool_call_fail_tensor,
+            "tool_fail_rate": tool_call_fail_rate_tensor,
             'exceed_mask': exceed_mask.contiguous(),
         },
         non_tensors={"multi_modal_inputs": mm_input_list} if processor is not None else None
@@ -387,16 +404,16 @@ def agent_rollout_loop(config, vllm_engine, vllm_inputs, prompts, multi_modal_in
 
 
 def execute_tool_call(sample, tokenizer=None, processor=None, pbar=None, vllm_input_list=None):
+    idx = sample.get('idx', -1)
     action_string = sample.get('action', '')
     tool = sample.get('tool', None)
     extra_info = sample.get('extra_info', None)
-    assert extra_info, "expect meaningful extra info!!"
 
     # non-agent data
     if action_string == '' or tool is None:
         return {}, 0.0, True, {}
 
-    tool_result, reward, done, info = tool.execute(action_string, vllm_input_list, extra_info=extra_info)
+    tool_result, reward, done, info = tool.execute(action_string, vllm_input_list, extra_info=extra_info, debug=(idx == 0))
     # tool_result, reward, done, info = tool.execute(action_string)
 
     # post-process

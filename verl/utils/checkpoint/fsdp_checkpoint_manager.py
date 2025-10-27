@@ -19,7 +19,13 @@ from typing import Union
 import torch
 import torch.distributed
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp import ShardedOptimStateDictConfig, ShardedStateDictConfig, StateDictType
+from torch.distributed.fsdp import (
+    FullOptimStateDictConfig,
+    FullStateDictConfig,
+    ShardedOptimStateDictConfig,
+    ShardedStateDictConfig,
+    StateDictType,
+)
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
 from verl.utils.fs import copy_to_local, is_non_local
@@ -164,11 +170,36 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             # wait for everyone to dump to local
             torch.distributed.barrier()
 
+            full_state_dict_cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+            full_optim_state_dict_cfg = FullOptimStateDictConfig(offload_to_cpu=True, rank0_only=True)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                with FSDP.state_dict_type(
+                    self.model,
+                    StateDictType.FULL_STATE_DICT,
+                    full_state_dict_cfg,
+                    full_optim_state_dict_cfg,
+                ):
+                    hf_model_state_dict = self.model.state_dict()
+
             if self.rank == 0:
                 hf_local_path = os.path.join(local_path, "huggingface")
                 os.makedirs(hf_local_path, exist_ok=True)
-                self.model._fsdp_wrapped_module.config.save_pretrained(hf_local_path)
-                self.processing_class.save_pretrained(hf_local_path)
+
+                base_module = getattr(self.model, "_fsdp_wrapped_module", self.model)
+                if hasattr(base_module, "save_pretrained"):
+                    base_module.save_pretrained(
+                        hf_local_path,
+                        state_dict=hf_model_state_dict,
+                        safe_serialization=True,
+                    )
+                else:
+                    raise AttributeError("FSDP-wrapped module does not provide `save_pretrained` for Hugging Face export")
+
+                if hasattr(self.processing_class, "save_pretrained"):
+                    self.processing_class.save_pretrained(hf_local_path)
+                else:
+                    warnings.warn("processing_class does not implement save_pretrained; skipping export")
 
         torch.distributed.barrier()
 

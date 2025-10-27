@@ -4,6 +4,8 @@ from .envs.rag_engine.rag_engine_v2 import RAGEngineEnvV2
 from .envs.visual_agent.vl_agent_v1 import VLAgentEnvV1
 from .envs.visual_agent.vl_agent_v2 import VLAgentEnvV2
 from .envs.mm_process_engine.search_agent_v1 import SearchAgentEnvV1
+from .envs.mm_process_engine.search_agent_v2 import SearchAgentEnvV2
+from .envs.mm_process_engine.search_agent_v4 import SearchAgentEnvV4
 from .envs.mm_process_engine.visual_toolbox import VisualToolBox
 from .envs.mm_process_engine.visual_toolbox_v2 import VisualToolBoxV2
 from .envs.mm_process_engine.visual_toolbox_v3 import VisualToolBoxV3

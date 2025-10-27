@@ -32,14 +32,17 @@ def format_usr_message(msg: str)->str:
 	return chat_template.format(msg)
 
 
-class SearchAgentEnvV1(ToolBase):
-	name = "search_agent_v1_1001"
+class SearchAgentEnvV4(ToolBase):
+	name = "search_agent_v4"
 	temp_dir = "/mnt/private/agent_workspace/hunyuan-o3/.temp/outputs/inference"
 	
 	def __init__(self, _name, _desc, _params, **kwargs):
 		self.chatml_history = []
 		self.multi_modal_data = None
 		self.reset_worker()
+		self.adaptive_scaling = 1.0
+		self.resized_height: Optional[int] = None
+		self.resized_width: Optional[int] = None
 
 		super().__init__(name=self.name)
 	
@@ -50,10 +53,12 @@ class SearchAgentEnvV1(ToolBase):
 		self.round_count = 0
 	
 
-	def execute_crop_tool(self, bbox_2d: List[float], label: Optional[str] = None, debug: bool = False, abs_scaling=1.) -> Dict[str, Any]:
+	def execute_crop_tool(self, bbox_2d: List[float], label: Optional[str] = None, debug: bool = False, abs_scaling=1., action=None) -> Dict[str, Any]:
 		"""Execute image crop tool call."""
 		if self.crop_call_count >= MAX_CROP_CALLS:
 			raise Exception(f"Maximum crop tool calls ({MAX_CROP_CALLS}) exceeded")
+		
+		debug_info = {'height': self.height, 'width': self.width, 'compressed_height': self.resized_height, 'compressed_width': self.resized_width}
 		
 		try:
 			os.makedirs(self.temp_dir, exist_ok=True)
@@ -66,7 +71,9 @@ class SearchAgentEnvV1(ToolBase):
 				label=label,
 				debug=debug,
 				abs_scaling=abs_scaling,
-				crop_path=crop_path
+				crop_path=crop_path,
+				action=action,
+				debug_info=debug_info
 			)
 
 			self.crop_call_count += 1
@@ -102,23 +109,23 @@ class SearchAgentEnvV1(ToolBase):
 	def increment_round(self):
 		"""Increment round counter."""
 		self.round_count += 1
+	
+	def wrap_tool_response(self, str_result):
+		return f'<tool_response>{str_result}</tool_response>'
 
-    
 	def execute(self, action_string, vllm_input_list, **kwargs):
 		# obs_dict, step_reward, done, info
 		debug = kwargs["debug"] if "debug" in kwargs else False
 		extra_info = kwargs["extra_info"] if "extra_info" in kwargs else None 
-		assert extra_info, "expect meaningful `extra_info` in tool env!!"
 		print(extra_info)
 
 		# TODO: remove this
-		# debug = True
+		debug = True
 		
 		info_dict = {
 			"tool_success": 0,
 			"tool_fail": 0,
 			"search_web": 0,
-			"search_web_cache_hit": 0,
 		}
 
 		crop_img = None
@@ -135,9 +142,16 @@ class SearchAgentEnvV1(ToolBase):
 						if name == "image_zoom_in_tool":
 							bbox_2d = arguments.get("bbox_2d")
 							label = arguments.get("label")
-							result = self.execute_crop_tool(bbox_2d, label, debug=debug, abs_scaling=2.0)
+							result = self.execute_crop_tool(
+								bbox_2d,
+								label,
+								debug=debug,
+								abs_scaling=self.adaptive_scaling,
+								action=action_string
+							)
 							usr_obs = f"For the image, You have zoomed in on the following area: {dump_tool_call(call)}, and the cropped image is as follows: <image>"
 							crop_img = result["cropped_image"]
+							usr_obs = self.wrap_tool_response(usr_obs)
 
 						elif name == "search_web":
 							query = arguments.get("query")
@@ -148,6 +162,7 @@ class SearchAgentEnvV1(ToolBase):
 								"result": result["results"]
 							}, ensure_ascii=False, indent=2)
 							usr_obs = f"For {dump_tool_call(call)}, the search results are as follows:\n{search_result_json}"
+							usr_obs = self.wrap_tool_response(usr_obs)
 						
 						else:
 							raise ValueError(f"Unknown tool call: `{name}`, please check the tool call and try again.")
@@ -190,7 +205,7 @@ class SearchAgentEnvV1(ToolBase):
 			obs_dict = {"prompt": format_usr_message(usr_obs), "multi_modal_data": {"image": [crop_img]}}
 		else:
 			obs_dict = format_usr_message(usr_obs)
-		return obs_dict, 0.0, has_answer, {}
+		return obs_dict, 0.0, has_answer, info_dict
 		
 
 	def reset(self, raw_prompt, multi_modal_data, origin_multi_modal_data, **kwargs):
@@ -201,12 +216,18 @@ class SearchAgentEnvV1(ToolBase):
 		assert len(self.multi_modal_data['image']) > 0, f'[ERROR] {self.multi_modal_data["image"]=}'
 		self.height = self.multi_modal_data['image'][0].height
 		self.width = self.multi_modal_data['image'][0].width
+
+		resized_h, resized_w = smart_resize(self.height, self.width)
+		self.resized_height = resized_h
+		self.resized_width = resized_w
+		self.adaptive_scaling = (self.width / resized_w) if resized_w else 1.0
+		# self.adaptive_scaling = 1.0
 		
 		self.reset_worker()
 
 
 if __name__ == '__main__':
-	tool = SearchAgentEnvV1(_name=None, _desc=None, _params=None)
+	tool = SearchAgentEnvV4(_name=None, _desc=None, _params=None)
 	img_path = "/mnt/private/agent_workspace/hunyuan-o3/.temp/datasets/google_javascript_maps/00011929-777f-4448-a931-21257ea1fc14/panorama-00011929-777f-4448-a931-21257ea1fc14.png"
 
 	if not os.path.exists(img_path):

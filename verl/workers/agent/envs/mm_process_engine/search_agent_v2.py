@@ -32,14 +32,17 @@ def format_usr_message(msg: str)->str:
 	return chat_template.format(msg)
 
 
-class SearchAgentEnvV1(ToolBase):
-	name = "search_agent_v1_1001"
+class SearchAgentEnvV2(ToolBase):
+	name = "search_agent_v1"
 	temp_dir = "/mnt/private/agent_workspace/hunyuan-o3/.temp/outputs/inference"
 	
 	def __init__(self, _name, _desc, _params, **kwargs):
 		self.chatml_history = []
 		self.multi_modal_data = None
 		self.reset_worker()
+		self.adaptive_scaling = 1.0
+		self.resized_height: Optional[int] = None
+		self.resized_width: Optional[int] = None
 
 		super().__init__(name=self.name)
 	
@@ -50,7 +53,7 @@ class SearchAgentEnvV1(ToolBase):
 		self.round_count = 0
 	
 
-	def execute_crop_tool(self, bbox_2d: List[float], label: Optional[str] = None, debug: bool = False, abs_scaling=1.) -> Dict[str, Any]:
+	def execute_crop_tool(self, bbox_2d: List[float], label: Optional[str] = None, debug: bool = False, abs_scaling=1., action=None) -> Dict[str, Any]:
 		"""Execute image crop tool call."""
 		if self.crop_call_count >= MAX_CROP_CALLS:
 			raise Exception(f"Maximum crop tool calls ({MAX_CROP_CALLS}) exceeded")
@@ -66,7 +69,8 @@ class SearchAgentEnvV1(ToolBase):
 				label=label,
 				debug=debug,
 				abs_scaling=abs_scaling,
-				crop_path=crop_path
+				crop_path=crop_path,
+				action=action
 			)
 
 			self.crop_call_count += 1
@@ -103,12 +107,10 @@ class SearchAgentEnvV1(ToolBase):
 		"""Increment round counter."""
 		self.round_count += 1
 
-    
 	def execute(self, action_string, vllm_input_list, **kwargs):
 		# obs_dict, step_reward, done, info
 		debug = kwargs["debug"] if "debug" in kwargs else False
 		extra_info = kwargs["extra_info"] if "extra_info" in kwargs else None 
-		assert extra_info, "expect meaningful `extra_info` in tool env!!"
 		print(extra_info)
 
 		# TODO: remove this
@@ -135,7 +137,13 @@ class SearchAgentEnvV1(ToolBase):
 						if name == "image_zoom_in_tool":
 							bbox_2d = arguments.get("bbox_2d")
 							label = arguments.get("label")
-							result = self.execute_crop_tool(bbox_2d, label, debug=debug, abs_scaling=2.0)
+							result = self.execute_crop_tool(
+								bbox_2d,
+								label,
+								debug=debug,
+								abs_scaling=self.adaptive_scaling,
+								action=action_string
+							)
 							usr_obs = f"For the image, You have zoomed in on the following area: {dump_tool_call(call)}, and the cropped image is as follows: <image>"
 							crop_img = result["cropped_image"]
 
@@ -201,12 +209,17 @@ class SearchAgentEnvV1(ToolBase):
 		assert len(self.multi_modal_data['image']) > 0, f'[ERROR] {self.multi_modal_data["image"]=}'
 		self.height = self.multi_modal_data['image'][0].height
 		self.width = self.multi_modal_data['image'][0].width
+		resized_h, resized_w = smart_resize(self.height, self.width)
+		self.resized_height = resized_h
+		self.resized_width = resized_w
+		# self.adaptive_scaling = (self.width / resized_w) if resized_w else 1.0
+		self.adaptive_scaling = 1.0
 		
 		self.reset_worker()
 
 
 if __name__ == '__main__':
-	tool = SearchAgentEnvV1(_name=None, _desc=None, _params=None)
+	tool = SearchAgentEnvV2(_name=None, _desc=None, _params=None)
 	img_path = "/mnt/private/agent_workspace/hunyuan-o3/.temp/datasets/google_javascript_maps/00011929-777f-4448-a931-21257ea1fc14/panorama-00011929-777f-4448-a931-21257ea1fc14.png"
 
 	if not os.path.exists(img_path):
