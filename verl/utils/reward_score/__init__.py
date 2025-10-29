@@ -93,6 +93,12 @@ def _default_compute_score(data_source, solution_str, ground_truth, extra_info=N
     elif data_source in ['google_map']:
         from . import search_agent
         res = search_agent.compure_score_search(solution_str, ground_truth, extra_info)
+    elif data_source in ['google_map_v1']:
+        from . import search_agent_v1
+        res = search_agent_v1.compure_score_search(solution_str, ground_truth, extra_info)
+    elif data_source in ['google_map_v2']:
+        from . import search_agent_v2
+        res = search_agent_v2.compure_score_search(solution_str, ground_truth, extra_info)
 
     elif data_source in ["frozenlake"]:
         res = 0.0
